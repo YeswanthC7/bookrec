@@ -1,0 +1,15 @@
+CREATE TABLE users (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(255) UNIQUE,
+  handle VARCHAR(50),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE books (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  title VARCHAR(512) NOT NULL,
+  author VARCHAR(512),
+  subjects JSON,
+  published_year INT,
+  popularity_score DOUBLE DEFAULT 0
+);
