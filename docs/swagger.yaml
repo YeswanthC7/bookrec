@@ -1,0 +1,194 @@
+basePath: /
+host: localhost:8080
+info:
+  contact: {}
+  description: Backend for personalized book recommendation system
+  title: BookRec API
+  version: "1.0"
+paths:
+  /books:
+    get:
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Limit
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List books (paginated)
+      tags:
+      - Books
+  /books/popular:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: Most popular books
+      tags:
+      - Books
+  /healthz:
+    get:
+      description: Returns status of the server
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health Check
+      tags:
+      - System
+  /interactions:
+    post:
+      consumes:
+      - multipart/form-data
+      parameters:
+      - description: User ID
+        in: formData
+        name: user_id
+        required: true
+        type: integer
+      - description: Book ID
+        in: formData
+        name: book_id
+        required: true
+        type: integer
+      - description: 'Action: like | view | rating'
+        in: formData
+        name: action
+        required: true
+        type: string
+      - description: Rating
+        in: formData
+        name: rating
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Record interaction
+      tags:
+      - Interactions
+  /recommendations/{user_id}:
+    get:
+      parameters:
+      - description: User ID
+        in: path
+        name: user_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: Get recommended books for a user
+      tags:
+      - Recommendations
+  /stats:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      summary: System stats (counts)
+      tags:
+      - System
+  /users:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: List all users
+      tags:
+      - Users
+    post:
+      consumes:
+      - multipart/form-data
+      description: Registers a new user
+      parameters:
+      - description: Email
+        in: formData
+        name: email
+        required: true
+        type: string
+      - description: Handle
+        in: formData
+        name: handle
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create a new user
+      tags:
+      - Users
+  /users/{id}/history:
+    get:
+      parameters:
+      - description: User ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+      summary: Get user interaction history
+      tags:
+      - Users
+swagger: "2.0"
