@@ -43,6 +43,55 @@ paths:
       summary: Most popular books
       tags:
       - Books
+  /books/search:
+    get:
+      parameters:
+      - description: Keyword in title or author
+        in: query
+        name: q
+        type: string
+      - description: Author filter (partial match)
+        in: query
+        name: author
+        type: string
+      - description: Published year from
+        in: query
+        name: year_from
+        type: integer
+      - description: Published year to
+        in: query
+        name: year_to
+        type: integer
+      - description: 'Sort: newest | popular | relevance (default relevance)'
+        in: query
+        name: sort
+        type: string
+      - default: 1
+        description: Page number
+        in: query
+        name: page
+        type: integer
+      - default: 20
+        description: Limit (max 100)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Search books (filters + pagination)
+      tags:
+      - Books
   /healthz:
     get:
       description: Returns status of the server

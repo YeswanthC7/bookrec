@@ -72,6 +72,79 @@ const docTemplate = `{
                 }
             }
         },
+        "/books/search": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Books"
+                ],
+                "summary": "Search books (filters + pagination)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Keyword in title or author",
+                        "name": "q",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Author filter (partial match)",
+                        "name": "author",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Published year from",
+                        "name": "year_from",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Published year to",
+                        "name": "year_to",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sort: newest | popular | relevance (default relevance)",
+                        "name": "sort",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Limit (max 100)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/healthz": {
             "get": {
                 "description": "Returns status of the server",

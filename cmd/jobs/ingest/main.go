@@ -15,7 +15,9 @@ import (
 )
 
 // Book represents one document from the Open Library API
+// NOTE: Open Library Search API returns a stable work key in "key" (e.g., "/works/OL82563W")
 type Book struct {
+	Key      string   `json:"key"` // ✅ added for idempotent upserts
 	Title    string   `json:"title"`
 	Authors  []string `json:"author_name"`
 	Subjects []string `json:"subject"`
@@ -54,7 +56,7 @@ func main() {
 	}
 	log.Println("✅ Connected to MySQL (local Docker container)")
 
-	// Categories to fetch
+	// Categories to fetch (optional: add demo-friendly queries like "harry+potter", "j+k+rowling")
 	categories := []string{
 		"science+fiction",
 		"data+science",
@@ -82,7 +84,12 @@ func main() {
 
 		insertCount := 0
 		for _, b := range result.Docs {
-			if b.Title == "" {
+			if strings.TrimSpace(b.Title) == "" {
+				continue
+			}
+
+			// ✅ Key is required for dedupe/upsert via UNIQUE(open_library_key)
+			if strings.TrimSpace(b.Key) == "" {
 				continue
 			}
 
@@ -94,12 +101,14 @@ func main() {
 			subjectsJSON, _ := json.Marshal(b.Subjects)
 
 			_, err := db.Exec(`
-				INSERT INTO books (title, author, subjects, published_year)
-				VALUES (?, ?, ?, ?)
+				INSERT INTO books (open_library_key, title, author, subjects, published_year)
+				VALUES (?, ?, ?, ?, ?)
 				ON DUPLICATE KEY UPDATE
+					title = VALUES(title),
 					author = VALUES(author),
 					subjects = VALUES(subjects),
 					published_year = VALUES(published_year)`,
+				strings.TrimSpace(b.Key),
 				strings.TrimSpace(b.Title),
 				author,
 				string(subjectsJSON),
@@ -111,6 +120,7 @@ func main() {
 			}
 			insertCount++
 		}
+
 		log.Printf("✅ Done category: %s (%d books added/updated)", cat, insertCount)
 	}
 

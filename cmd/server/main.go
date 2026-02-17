@@ -64,6 +64,7 @@ func main() {
     r.GET("/users/:id/history", UserHistoryHandler)
 
     r.GET("/books", ListBooksHandler)
+    r.GET("/books/search", SearchBooksHandler)
     r.GET("/books/popular", PopularBooksHandler)
 
     r.POST("/interactions", CreateInteractionHandler)
@@ -428,4 +429,164 @@ func RecommendationsHandler(c *gin.Context) {
     }
 
     c.JSON(200, recs)
+}
+// SearchBooksHandler godoc
+// @Summary Search books (filters + pagination)
+// @Tags Books
+// @Produce json
+// @Param q query string false "Keyword in title or author"
+// @Param author query string false "Author filter (partial match)"
+// @Param year_from query int false "Published year from"
+// @Param year_to query int false "Published year to"
+// @Param sort query string false "Sort: newest | popular | relevance (default relevance)"
+// @Param page query int false "Page number" default(1)
+// @Param limit query int false "Limit (max 100)" default(20)
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} map[string]interface{}
+// @Router /books/search [get]
+func SearchBooksHandler(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	author := strings.TrimSpace(c.Query("author"))
+	sort := strings.TrimSpace(c.DefaultQuery("sort", "relevance"))
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	yearFromStr := strings.TrimSpace(c.Query("year_from"))
+	yearToStr := strings.TrimSpace(c.Query("year_to"))
+	yearFrom, _ := strconv.Atoi(yearFromStr)
+	yearTo, _ := strconv.Atoi(yearToStr)
+
+	// Base query
+	sb := strings.Builder{}
+	sb.WriteString(`
+		SELECT b.id, b.title, b.author, b.published_year
+		FROM books b
+		WHERE 1=1
+	`)
+
+	args := []interface{}{}
+
+	// Filters
+	if q != "" {
+		sb.WriteString(" AND (b.title LIKE ? OR b.author LIKE ?)")
+		args = append(args, "%"+q+"%", "%"+q+"%")
+	}
+	if author != "" {
+		sb.WriteString(" AND b.author LIKE ?")
+		args = append(args, "%"+author+"%")
+	}
+	if yearFromStr != "" && yearFrom > 0 {
+		sb.WriteString(" AND b.published_year >= ?")
+		args = append(args, yearFrom)
+	}
+	if yearToStr != "" && yearTo > 0 {
+		sb.WriteString(" AND b.published_year <= ?")
+		args = append(args, yearTo)
+	}
+
+	// Sorting
+	switch sort {
+	case "newest":
+		sb.WriteString(" ORDER BY b.published_year DESC, b.id DESC")
+	case "popular":
+		// Popular = number of likes
+		// Use LEFT JOIN so books with 0 likes still appear
+		// NOTE: We need to rewrite select when joining aggregation
+		sb.Reset()
+		sb.WriteString(`
+			SELECT b.id, b.title, b.author, b.published_year, COUNT(i.id) AS likes
+			FROM books b
+			LEFT JOIN interactions i
+				ON i.book_id = b.id AND i.action = 'like'
+			WHERE 1=1
+		`)
+
+		// re-apply same filters to this query
+		args = []interface{}{}
+		if q != "" {
+			sb.WriteString(" AND (b.title LIKE ? OR b.author LIKE ?)")
+			args = append(args, "%"+q+"%", "%"+q+"%")
+		}
+		if author != "" {
+			sb.WriteString(" AND b.author LIKE ?")
+			args = append(args, "%"+author+"%")
+		}
+		if yearFromStr != "" && yearFrom > 0 {
+			sb.WriteString(" AND b.published_year >= ?")
+			args = append(args, yearFrom)
+		}
+		if yearToStr != "" && yearTo > 0 {
+			sb.WriteString(" AND b.published_year <= ?")
+			args = append(args, yearTo)
+		}
+
+		sb.WriteString(" GROUP BY b.id, b.title, b.author, b.published_year")
+		sb.WriteString(" ORDER BY likes DESC, b.id DESC")
+	default:
+		// "relevance" (simple): recent id tie-breaker
+		// If q is provided, you can later add scoring logic; for now keep deterministic
+		sb.WriteString(" ORDER BY b.id DESC")
+	}
+
+	// Pagination
+	sb.WriteString(" LIMIT ? OFFSET ?")
+	args = append(args, limit, offset)
+
+	rows, err := db.Query(sb.String(), args...)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	data := []map[string]interface{}{}
+
+	// Scan depends on sort=popular (extra likes column)
+	if sort == "popular" {
+		for rows.Next() {
+			var id, year, likes int
+			var title, author string
+			if err := rows.Scan(&id, &title, &author, &year, &likes); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+			data = append(data, gin.H{
+				"id":     id,
+				"title":  title,
+				"author": author,
+				"year":   year,
+				"likes":  likes,
+			})
+		}
+	} else {
+		for rows.Next() {
+			var id, year int
+			var title, author string
+			if err := rows.Scan(&id, &title, &author, &year); err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+			data = append(data, gin.H{
+				"id":     id,
+				"title":  title,
+				"author": author,
+				"year":   year,
+			})
+		}
+	}
+
+	c.JSON(200, gin.H{
+		"page":  page,
+		"limit": limit,
+		"sort":  sort,
+		"data":  data,
+	})
 }
