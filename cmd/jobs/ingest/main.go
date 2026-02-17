@@ -15,9 +15,8 @@ import (
 )
 
 // Book represents one document from the Open Library API
-// NOTE: Open Library Search API returns a stable work key in "key" (e.g., "/works/OL82563W")
 type Book struct {
-	Key      string   `json:"key"` // ✅ added for idempotent upserts
+	Key      string   `json:"key"`
 	Title    string   `json:"title"`
 	Authors  []string `json:"author_name"`
 	Subjects []string `json:"subject"`
@@ -49,14 +48,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Failed to open DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("❌ Cannot reach DB: %v", err)
 	}
 	log.Println("✅ Connected to MySQL (local Docker container)")
 
-	// Categories to fetch (optional: add demo-friendly queries like "harry+potter", "j+k+rowling")
+	// Categories to fetch
 	categories := []string{
 		"science+fiction",
 		"data+science",
@@ -73,8 +72,14 @@ func main() {
 			log.Printf("⚠️  HTTP request failed for %s: %v", cat, err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close() // close immediately since we're in a loop
+
+		if readErr != nil {
+			log.Printf("⚠️  Read body failed for %s: %v", cat, readErr)
+			continue
+		}
 
 		var result SearchResponse
 		if err := json.Unmarshal(body, &result); err != nil {
@@ -87,9 +92,8 @@ func main() {
 			if strings.TrimSpace(b.Title) == "" {
 				continue
 			}
-
-			// ✅ Key is required for dedupe/upsert via UNIQUE(open_library_key)
 			if strings.TrimSpace(b.Key) == "" {
+				// Key is needed for idempotent upsert on UNIQUE(open_library_key)
 				continue
 			}
 
