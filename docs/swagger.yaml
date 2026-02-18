@@ -136,9 +136,50 @@ paths:
           schema:
             additionalProperties: true
             type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties: true
+            type: object
       summary: Record interaction
       tags:
       - Interactions
+  /login:
+    post:
+      consumes:
+      - multipart/form-data
+      parameters:
+      - description: Email
+        in: formData
+        name: email
+        required: true
+        type: string
+      - description: Password
+        in: formData
+        name: password
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Login and get JWT token
+      tags:
+      - Auth
   /recommendations/{user_id}:
     get:
       parameters:
@@ -201,6 +242,11 @@ paths:
       - description: Handle
         in: formData
         name: handle
+        required: true
+        type: string
+      - description: Password
+        in: formData
+        name: password
         required: true
         type: string
       produces:

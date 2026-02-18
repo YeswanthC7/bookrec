@@ -8,10 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 
 	// Swagger
 	_ "github.com/YeswanthC7/bookrec/docs"
@@ -22,6 +25,65 @@ import (
 // global DB handle for handlers
 var db *sql.DB
 
+// JWT config
+var jwtSecret []byte
+var jwtIssuer string
+
+type AuthClaims struct {
+	UserID int    `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
+}
+
+func generateToken(userID int, email string) (string, error) {
+	now := time.Now()
+	claims := AuthClaims{
+		UserID: userID,
+		Email:  email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    jwtIssuer,
+			Subject:   fmt.Sprintf("%d", userID),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(24 * time.Hour)),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtSecret)
+}
+
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid Authorization header"})
+			return
+		}
+
+		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+		token, err := jwt.ParseWithClaims(tokenStr, &AuthClaims{}, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method")
+			}
+			return jwtSecret, nil
+		})
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		claims, ok := token.Claims.(*AuthClaims)
+		if !ok || !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token claims"})
+			return
+		}
+
+		c.Set("auth_user_id", claims.UserID)
+		c.Set("auth_email", claims.Email)
+		c.Next()
+	}
+}
+
 // @title BookRec API
 // @version 1.0
 // @description Backend for personalized book recommendation system
@@ -31,6 +93,16 @@ func main() {
 	// Load environment variables
 	if err := godotenv.Load("configs/.env"); err != nil {
 		log.Println("⚠️ No .env file found, using system vars")
+	}
+
+	// JWT env
+	jwtSecret = []byte(os.Getenv("JWT_SECRET"))
+	if len(jwtSecret) == 0 {
+		log.Fatal("❌ JWT_SECRET is required")
+	}
+	jwtIssuer = os.Getenv("JWT_ISSUER")
+	if jwtIssuer == "" {
+		jwtIssuer = "bookrec"
 	}
 
 	// Build DSN
@@ -60,6 +132,8 @@ func main() {
 	r.GET("/stats", StatsHandler)
 
 	r.POST("/users", CreateUserHandler)
+	r.POST("/login", LoginHandler)
+
 	r.GET("/users", ListUsersHandler)
 	r.GET("/users/:id/history", UserHistoryHandler)
 
@@ -67,7 +141,8 @@ func main() {
 	r.GET("/books/search", SearchBooksHandler)
 	r.GET("/books/popular", PopularBooksHandler)
 
-	r.POST("/interactions", CreateInteractionHandler)
+	// Protected
+	r.POST("/interactions", AuthMiddleware(), CreateInteractionHandler)
 
 	r.GET("/recommendations/:user_id", RecommendationsHandler)
 
@@ -130,19 +205,27 @@ func StatsHandler(c *gin.Context) {
 // @Produce json
 // @Param email formData string true "Email"
 // @Param handle formData string true "Handle"
+// @Param password formData string true "Password"
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} map[string]interface{}
 // @Router /users [post]
 func CreateUserHandler(c *gin.Context) {
-	email := c.PostForm("email")
-	handle := c.PostForm("handle")
+	email := strings.TrimSpace(c.PostForm("email"))
+	handle := strings.TrimSpace(c.PostForm("handle"))
+	password := c.PostForm("password")
 
-	if email == "" || handle == "" {
-		c.JSON(400, gin.H{"error": "email and handle required"})
+	if email == "" || handle == "" || password == "" {
+		c.JSON(400, gin.H{"error": "email, handle, and password required"})
 		return
 	}
 
-	_, err := db.Exec("INSERT INTO users (email, handle) VALUES (?, ?)", email, handle)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	_, err = db.Exec("INSERT INTO users (email, handle, password_hash) VALUES (?, ?, ?)", email, handle, string(hashed))
 	if err != nil {
 		if strings.Contains(err.Error(), "Duplicate entry") {
 			c.JSON(400, gin.H{"error": "Email already exists"})
@@ -153,6 +236,49 @@ func CreateUserHandler(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"message": "User created"})
+}
+
+// LoginHandler godoc
+// @Summary Login and get JWT token
+// @Tags Auth
+// @Accept mpfd
+// @Produce json
+// @Param email formData string true "Email"
+// @Param password formData string true "Password"
+// @Success 200 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Router /login [post]
+func LoginHandler(c *gin.Context) {
+	email := strings.TrimSpace(c.PostForm("email"))
+	password := c.PostForm("password")
+
+	if email == "" || password == "" {
+		c.JSON(400, gin.H{"error": "email and password required"})
+		return
+	}
+
+	var userID int
+	var passwordHash string
+	if err := db.QueryRow("SELECT id, password_hash FROM users WHERE email = ?", email).Scan(&userID, &passwordHash); err != nil {
+		c.JSON(401, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
+		c.JSON(401, gin.H{"error": "invalid credentials"})
+		return
+	}
+
+	token, err := generateToken(userID, email)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to generate token"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"token": token,
+		"user":  gin.H{"id": userID, "email": email},
+	})
 }
 
 // ListUsersHandler godoc
@@ -299,6 +425,8 @@ func PopularBooksHandler(c *gin.Context) {
 // @Param action formData string true "Action: like | view | rating"
 // @Param rating formData int false "Rating"
 // @Success 200 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Failure 403 {object} map[string]interface{}
 // @Router /interactions [post]
 func CreateInteractionHandler(c *gin.Context) {
 	userID := c.PostForm("user_id")
@@ -311,21 +439,43 @@ func CreateInteractionHandler(c *gin.Context) {
 		return
 	}
 
-	var err error
+	// Enforce token user == form user_id (prevents spoofing)
+	authUserIDAny, exists := c.Get("auth_user_id")
+	if !exists {
+		c.JSON(401, gin.H{"error": "unauthorized"})
+		return
+	}
+	authUserID, ok := authUserIDAny.(int)
+	if !ok {
+		c.JSON(401, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	uid, err := strconv.Atoi(userID)
+	if err != nil || uid <= 0 {
+		c.JSON(400, gin.H{"error": "invalid user_id"})
+		return
+	}
+	if uid != authUserID {
+		c.JSON(403, gin.H{"error": "cannot create interaction for another user"})
+		return
+	}
+
+	var execErr error
 	if rating == "" {
-		_, err = db.Exec(`
+		_, execErr = db.Exec(`
             INSERT INTO interactions (user_id, book_id, action)
             VALUES (?, ?, ?)`,
 			userID, bookID, action)
 	} else {
-		_, err = db.Exec(`
+		_, execErr = db.Exec(`
             INSERT INTO interactions (user_id, book_id, action, rating)
             VALUES (?, ?, ?, ?)`,
 			userID, bookID, action, rating)
 	}
 
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if execErr != nil {
+		c.JSON(500, gin.H{"error": execErr.Error()})
 		return
 	}
 
