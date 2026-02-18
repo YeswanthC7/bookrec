@@ -229,3 +229,23 @@ Ideas for future extensions:
 - Search endpoint with full-text support
 - Moving handler logic into `internal/api` and `internal/core` for a stricter layered architecture
 - Docker Compose file to bring up API + MySQL in one command
+
+## Auth (JWT)
+
+### Create user
+curl -X POST http://localhost:8080/users \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "email=testjwt@example.com&handle=testjwt&password=Passw0rd!"
+
+### Login
+curl -X POST http://localhost:8080/login \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "email=testjwt@example.com&password=Passw0rd!"
+
+# => copy token from response
+
+### Protected: create interaction
+curl -X POST http://localhost:8080/interactions \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "user_id=1&book_id=1&action=like"
