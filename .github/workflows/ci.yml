@@ -30,3 +30,6 @@ jobs:
         with:
           version: v1.57.2
           args: --timeout=5m
+          skip-cache: true
+        env:
+          GOFLAGS: -mod=mod
