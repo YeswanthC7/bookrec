@@ -39,6 +39,7 @@ var refreshTokenTTL = 30 * 24 * time.Hour // 30 days
 type AuthClaims struct {
 	UserID int    `json:"user_id"`
 	Email  string `json:"email"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -57,11 +58,16 @@ type LogoutResponse struct {
 	Message string `json:"message"`
 }
 
-func generateToken(userID int, email string) (string, error) {
+func generateToken(userID int, email string, role string) (string, error) {
 	now := time.Now()
+	if role == "" {
+		role = "user"
+	}
+
 	claims := AuthClaims{
 		UserID: userID,
 		Email:  email,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    jwtIssuer,
 			Subject:   fmt.Sprintf("%d", userID),
@@ -100,15 +106,6 @@ func insertRefreshToken(userID int, tokenHash string, expiresAt time.Time) error
 	return err
 }
 
-func revokeRefreshTokenByID(id int) error {
-	_, err := db.Exec(`
-		UPDATE refresh_tokens
-		SET revoked_at = NOW()
-		WHERE id = ? AND revoked_at IS NULL`,
-		id)
-	return err
-}
-
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -135,8 +132,30 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		role := claims.Role
+		if role == "" {
+			role = "user"
+		}
+
 		c.Set("auth_user_id", claims.UserID)
 		c.Set("auth_email", claims.Email)
+		c.Set("auth_role", role)
+		c.Next()
+	}
+}
+
+func RequireRole(required string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleAny, ok := c.Get("auth_role")
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+		role, _ := roleAny.(string)
+		if role != required {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
 		c.Next()
 	}
 }
@@ -198,9 +217,13 @@ func main() {
 	r.POST("/users", CreateUserHandler)
 	r.POST("/login", LoginHandler)
 
-	// Refresh + logout (refresh rotates refresh token every time)
+	// Refresh + logout
 	r.POST("/refresh", RefreshHandler)
 	r.POST("/logout", LogoutHandler)
+	r.POST("/logout-all", AuthMiddleware(), LogoutAllHandler)
+
+	// Example admin-only route (role-based auth)
+	r.GET("/admin/users", AuthMiddleware(), RequireRole("admin"), ListUsersHandler)
 
 	r.GET("/users", ListUsersHandler)
 	r.GET("/users/:id/history", UserHistoryHandler)
@@ -327,9 +350,14 @@ func LoginHandler(c *gin.Context) {
 
 	var userID int
 	var passwordHash string
-	if err := db.QueryRow("SELECT id, password_hash FROM users WHERE email = ?", email).Scan(&userID, &passwordHash); err != nil {
+	var role string
+	if err := db.QueryRow("SELECT id, password_hash, role FROM users WHERE email = ?", email).
+		Scan(&userID, &passwordHash, &role); err != nil {
 		c.JSON(401, gin.H{"error": "invalid credentials"})
 		return
+	}
+	if role == "" {
+		role = "user"
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
@@ -337,7 +365,7 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	accessToken, err := generateToken(userID, email)
+	accessToken, err := generateToken(userID, email, role)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to generate access token"})
 		return
@@ -356,7 +384,7 @@ func LoginHandler(c *gin.Context) {
 	c.JSON(200, LoginResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshPlain,
-		User:         gin.H{"id": userID, "email": email},
+		User:         gin.H{"id": userID, "email": email, "role": role},
 	})
 }
 
@@ -377,17 +405,26 @@ func RefreshHandler(c *gin.Context) {
 	}
 
 	tokenHash := hashRefreshToken(refreshToken)
+	now := time.Now()
 
-	// Validate refresh token row
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to start transaction"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Lock the token row so rotation is race-safe
 	var rowID int
 	var userID int
 	var expiresAt time.Time
 	var revokedAt sql.NullTime
-	if err := db.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT id, user_id, expires_at, revoked_at
 		FROM refresh_tokens
 		WHERE token_hash = ?
-		LIMIT 1`, tokenHash).Scan(&rowID, &userID, &expiresAt, &revokedAt); err != nil {
+		LIMIT 1
+		FOR UPDATE`, tokenHash).Scan(&rowID, &userID, &expiresAt, &revokedAt); err != nil {
 		c.JSON(401, gin.H{"error": "invalid refresh token"})
 		return
 	}
@@ -396,36 +433,58 @@ func RefreshHandler(c *gin.Context) {
 		c.JSON(401, gin.H{"error": "refresh token revoked"})
 		return
 	}
-	if time.Now().After(expiresAt) {
-		_ = revokeRefreshTokenByID(rowID) // best-effort cleanup
+	if now.After(expiresAt) {
+		_, _ = tx.Exec(`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, rowID)
+		_ = tx.Commit()
 		c.JSON(401, gin.H{"error": "refresh token expired"})
 		return
 	}
 
-	// Get email for JWT claims
+	// Load user email + role for JWT claims
 	var email string
-	if err := db.QueryRow(`SELECT email FROM users WHERE id = ?`, userID).Scan(&email); err != nil {
+	var role string
+	if err := tx.QueryRow(`SELECT email, role FROM users WHERE id = ?`, userID).Scan(&email, &role); err != nil {
 		c.JSON(401, gin.H{"error": "invalid refresh token user"})
 		return
 	}
+	if role == "" {
+		role = "user"
+	}
 
-	// Rotation: revoke old token, issue new refresh + new access
-	if err := revokeRefreshTokenByID(rowID); err != nil {
+	// Revoke old token (must affect 1 row)
+	res, err := tx.Exec(`
+		UPDATE refresh_tokens
+		SET revoked_at = ?
+		WHERE id = ? AND revoked_at IS NULL`, now, rowID)
+	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to rotate refresh token"})
 		return
 	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		c.JSON(401, gin.H{"error": "refresh token revoked"})
+		return
+	}
 
+	// Insert rotated refresh token
 	newPlain, newHash, newExp, err := newRefreshToken()
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to generate new refresh token"})
 		return
 	}
-	if err := insertRefreshToken(userID, newHash, newExp); err != nil {
+	if _, err := tx.Exec(`
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES (?, ?, ?)`, userID, newHash, newExp); err != nil {
 		c.JSON(500, gin.H{"error": "failed to store new refresh token"})
 		return
 	}
 
-	accessToken, err := generateToken(userID, email)
+	if err := tx.Commit(); err != nil {
+		c.JSON(500, gin.H{"error": "failed to commit transaction"})
+		return
+	}
+
+	accessToken, err := generateToken(userID, email, role)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to generate access token"})
 		return
@@ -455,7 +514,6 @@ func LogoutHandler(c *gin.Context) {
 
 	tokenHash := hashRefreshToken(refreshToken)
 
-	// Revoke best-effort; if token doesn't exist treat as invalid
 	res, err := db.Exec(`
 		UPDATE refresh_tokens
 		SET revoked_at = NOW()
@@ -471,6 +529,38 @@ func LogoutHandler(c *gin.Context) {
 	}
 
 	c.JSON(200, LogoutResponse{Message: "Logged out"})
+}
+
+// LogoutAllHandler godoc
+// @Summary Logout from all sessions (revoke all refresh tokens for current user)
+// @Tags Auth
+// @Produce json
+// @Param Authorization header string true "Bearer token"
+// @Success 200 {object} LogoutResponse
+// @Failure 401 {object} map[string]interface{}
+// @Router /logout-all [post]
+func LogoutAllHandler(c *gin.Context) {
+	authUserIDAny, ok := c.Get("auth_user_id")
+	if !ok {
+		c.JSON(401, gin.H{"error": "unauthorized"})
+		return
+	}
+	userID, ok := authUserIDAny.(int)
+	if !ok || userID <= 0 {
+		c.JSON(401, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	_, err := db.Exec(`
+		UPDATE refresh_tokens
+		SET revoked_at = NOW()
+		WHERE user_id = ? AND revoked_at IS NULL`, userID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to revoke refresh tokens"})
+		return
+	}
+
+	c.JSON(200, LogoutResponse{Message: "Logged out from all sessions"})
 }
 
 // ListUsersHandler godoc
