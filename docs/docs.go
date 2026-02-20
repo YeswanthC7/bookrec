@@ -240,7 +240,7 @@ const docTemplate = `{
                 "tags": [
                     "Auth"
                 ],
-                "summary": "Login and get JWT token + refresh token",
+                "summary": "Login and get tokens (access + refresh)",
                 "parameters": [
                     {
                         "type": "string",
@@ -261,8 +261,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/cmd_server.LoginResponse"
                         }
                     },
                     "401": {
@@ -286,11 +285,11 @@ const docTemplate = `{
                 "tags": [
                     "Auth"
                 ],
-                "summary": "Revoke a refresh token (logout)",
+                "summary": "Logout (revoke refresh token)",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Refresh Token",
+                        "description": "Refresh token",
                         "name": "refresh_token",
                         "in": "formData",
                         "required": true
@@ -300,12 +299,46 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
+                            "$ref": "#/definitions/cmd_server.LogoutResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
                             "type": "object",
                             "additionalProperties": true
                         }
+                    }
+                }
+            }
+        },
+        "/logout-all": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Logout from all sessions (revoke all refresh tokens for current user)",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Bearer token",
+                        "name": "Authorization",
+                        "in": "header",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/cmd_server.LogoutResponse"
+                        }
                     },
-                    "400": {
-                        "description": "Bad Request",
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -357,11 +390,11 @@ const docTemplate = `{
                 "tags": [
                     "Auth"
                 ],
-                "summary": "Rotate refresh token and get new access token",
+                "summary": "Refresh tokens (rotates refresh token every call)",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Refresh Token",
+                        "description": "Refresh token",
                         "name": "refresh_token",
                         "in": "formData",
                         "required": true
@@ -371,8 +404,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": true
+                            "$ref": "#/definitions/cmd_server.RefreshResponse"
                         }
                     },
                     "401": {
@@ -511,6 +543,45 @@ const docTemplate = `{
                     }
                 }
             }
+        }
+    },
+    "definitions": {
+        "cmd_server.LoginResponse": {
+            "type": "object",
+            "properties": {
+                "access_token": {
+                    "type": "string"
+                },
+                "refresh_token": {
+                    "type": "string"
+                },
+                "user": {
+                    "$ref": "#/definitions/gin.H"
+                }
+            }
+        },
+        "cmd_server.LogoutResponse": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
+        "cmd_server.RefreshResponse": {
+            "type": "object",
+            "properties": {
+                "access_token": {
+                    "type": "string"
+                },
+                "refresh_token": {
+                    "type": "string"
+                }
+            }
+        },
+        "gin.H": {
+            "type": "object",
+            "additionalProperties": {}
         }
     }
 }`
