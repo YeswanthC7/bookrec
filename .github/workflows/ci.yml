@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   test-and-lint:
@@ -26,11 +26,11 @@ jobs:
         run: go test ./... -v
 
       - name: Run golangci-lint
-  	uses: golangci/golangci-lint-action@v6
-  	with:
-    	  version: v1.64.8
-    	  install-mode: goinstall
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          install-mode: goinstall
           args: --timeout=5m --config=.golangci.yml
           skip-cache: true
-  	env:
-    	  GOFLAGS: -mod=mod
+        env:
+          GOFLAGS: -mod=mod
