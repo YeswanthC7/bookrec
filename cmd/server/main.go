@@ -1,7 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,8 +15,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 
@@ -29,10 +33,28 @@ var db *sql.DB
 var jwtSecret []byte
 var jwtIssuer string
 
+// Refresh token config
+var refreshTokenTTL = 30 * 24 * time.Hour // 30 days
+
 type AuthClaims struct {
 	UserID int    `json:"user_id"`
 	Email  string `json:"email"`
 	jwt.RegisteredClaims
+}
+
+type LoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	User         gin.H  `json:"user"`
+}
+
+type RefreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type LogoutResponse struct {
+	Message string `json:"message"`
 }
 
 func generateToken(userID int, email string) (string, error) {
@@ -50,6 +72,41 @@ func generateToken(userID int, email string) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(jwtSecret)
+}
+
+func hashRefreshToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
+
+func newRefreshToken() (plain string, tokenHash string, expiresAt time.Time, err error) {
+	// 32 bytes => 256-bit random
+	b := make([]byte, 32)
+	if _, err = rand.Read(b); err != nil {
+		return "", "", time.Time{}, err
+	}
+
+	plain = base64.RawURLEncoding.EncodeToString(b)
+	tokenHash = hashRefreshToken(plain)
+	expiresAt = time.Now().Add(refreshTokenTTL)
+	return plain, tokenHash, expiresAt, nil
+}
+
+func insertRefreshToken(userID int, tokenHash string, expiresAt time.Time) error {
+	_, err := db.Exec(`
+		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		VALUES (?, ?, ?)`,
+		userID, tokenHash, expiresAt)
+	return err
+}
+
+func revokeRefreshTokenByID(id int) error {
+	_, err := db.Exec(`
+		UPDATE refresh_tokens
+		SET revoked_at = NOW()
+		WHERE id = ? AND revoked_at IS NULL`,
+		id)
+	return err
 }
 
 func AuthMiddleware() gin.HandlerFunc {
@@ -105,6 +162,13 @@ func main() {
 		jwtIssuer = "bookrec"
 	}
 
+	// Optional refresh TTL override (hours)
+	if v := strings.TrimSpace(os.Getenv("REFRESH_TOKEN_TTL_HOURS")); v != "" {
+		if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
+			refreshTokenTTL = time.Duration(hours) * time.Hour
+		}
+	}
+
 	// Build DSN
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:3307)/%s?parseTime=true&tls=%s",
 		os.Getenv("DB_USER"),
@@ -133,6 +197,10 @@ func main() {
 
 	r.POST("/users", CreateUserHandler)
 	r.POST("/login", LoginHandler)
+
+	// Refresh + logout (refresh rotates refresh token every time)
+	r.POST("/refresh", RefreshHandler)
+	r.POST("/logout", LogoutHandler)
 
 	r.GET("/users", ListUsersHandler)
 	r.GET("/users/:id/history", UserHistoryHandler)
@@ -239,13 +307,13 @@ func CreateUserHandler(c *gin.Context) {
 }
 
 // LoginHandler godoc
-// @Summary Login and get JWT token
+// @Summary Login and get tokens (access + refresh)
 // @Tags Auth
 // @Accept mpfd
 // @Produce json
 // @Param email formData string true "Email"
 // @Param password formData string true "Password"
-// @Success 200 {object} map[string]interface{}
+// @Success 200 {object} LoginResponse
 // @Failure 401 {object} map[string]interface{}
 // @Router /login [post]
 func LoginHandler(c *gin.Context) {
@@ -269,16 +337,140 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	token, err := generateToken(userID, email)
+	accessToken, err := generateToken(userID, email)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate token"})
+		c.JSON(500, gin.H{"error": "failed to generate access token"})
 		return
 	}
 
-	c.JSON(200, gin.H{
-		"token": token,
-		"user":  gin.H{"id": userID, "email": email},
+	refreshPlain, refreshHash, refreshExp, err := newRefreshToken()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to generate refresh token"})
+		return
+	}
+	if err := insertRefreshToken(userID, refreshHash, refreshExp); err != nil {
+		c.JSON(500, gin.H{"error": "failed to store refresh token"})
+		return
+	}
+
+	c.JSON(200, LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshPlain,
+		User:         gin.H{"id": userID, "email": email},
 	})
+}
+
+// RefreshHandler godoc
+// @Summary Refresh tokens (rotates refresh token every call)
+// @Tags Auth
+// @Accept mpfd
+// @Produce json
+// @Param refresh_token formData string true "Refresh token"
+// @Success 200 {object} RefreshResponse
+// @Failure 401 {object} map[string]interface{}
+// @Router /refresh [post]
+func RefreshHandler(c *gin.Context) {
+	refreshToken := strings.TrimSpace(c.PostForm("refresh_token"))
+	if refreshToken == "" {
+		c.JSON(400, gin.H{"error": "refresh_token required"})
+		return
+	}
+
+	tokenHash := hashRefreshToken(refreshToken)
+
+	// Validate refresh token row
+	var rowID int
+	var userID int
+	var expiresAt time.Time
+	var revokedAt sql.NullTime
+	if err := db.QueryRow(`
+		SELECT id, user_id, expires_at, revoked_at
+		FROM refresh_tokens
+		WHERE token_hash = ?
+		LIMIT 1`, tokenHash).Scan(&rowID, &userID, &expiresAt, &revokedAt); err != nil {
+		c.JSON(401, gin.H{"error": "invalid refresh token"})
+		return
+	}
+
+	if revokedAt.Valid {
+		c.JSON(401, gin.H{"error": "refresh token revoked"})
+		return
+	}
+	if time.Now().After(expiresAt) {
+		_ = revokeRefreshTokenByID(rowID) // best-effort cleanup
+		c.JSON(401, gin.H{"error": "refresh token expired"})
+		return
+	}
+
+	// Get email for JWT claims
+	var email string
+	if err := db.QueryRow(`SELECT email FROM users WHERE id = ?`, userID).Scan(&email); err != nil {
+		c.JSON(401, gin.H{"error": "invalid refresh token user"})
+		return
+	}
+
+	// Rotation: revoke old token, issue new refresh + new access
+	if err := revokeRefreshTokenByID(rowID); err != nil {
+		c.JSON(500, gin.H{"error": "failed to rotate refresh token"})
+		return
+	}
+
+	newPlain, newHash, newExp, err := newRefreshToken()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to generate new refresh token"})
+		return
+	}
+	if err := insertRefreshToken(userID, newHash, newExp); err != nil {
+		c.JSON(500, gin.H{"error": "failed to store new refresh token"})
+		return
+	}
+
+	accessToken, err := generateToken(userID, email)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to generate access token"})
+		return
+	}
+
+	c.JSON(200, RefreshResponse{
+		AccessToken:  accessToken,
+		RefreshToken: newPlain,
+	})
+}
+
+// LogoutHandler godoc
+// @Summary Logout (revoke refresh token)
+// @Tags Auth
+// @Accept mpfd
+// @Produce json
+// @Param refresh_token formData string true "Refresh token"
+// @Success 200 {object} LogoutResponse
+// @Failure 401 {object} map[string]interface{}
+// @Router /logout [post]
+func LogoutHandler(c *gin.Context) {
+	refreshToken := strings.TrimSpace(c.PostForm("refresh_token"))
+	if refreshToken == "" {
+		c.JSON(400, gin.H{"error": "refresh_token required"})
+		return
+	}
+
+	tokenHash := hashRefreshToken(refreshToken)
+
+	// Revoke best-effort; if token doesn't exist treat as invalid
+	res, err := db.Exec(`
+		UPDATE refresh_tokens
+		SET revoked_at = NOW()
+		WHERE token_hash = ? AND revoked_at IS NULL`, tokenHash)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to revoke refresh token"})
+		return
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		c.JSON(401, gin.H{"error": "invalid refresh token"})
+		return
+	}
+
+	c.JSON(200, LogoutResponse{Message: "Logged out"})
 }
 
 // ListUsersHandler godoc
@@ -338,7 +530,7 @@ func ListBooksHandler(c *gin.Context) {
 	offset := (page - 1) * limit
 
 	query := `
-        SELECT id, title, author, published_year 
+        SELECT id, title, author, published_year
         FROM books
         ORDER BY id
         LIMIT ? OFFSET ?;
@@ -704,6 +896,7 @@ func SearchBooksHandler(c *gin.Context) {
 		sb.WriteString(" GROUP BY b.id, b.title, b.author, b.published_year")
 		sb.WriteString(" ORDER BY likes DESC, b.id DESC")
 	default:
+		// NOTE: currently "relevance" falls back to newest-by-id
 		sb.WriteString(" ORDER BY b.id DESC")
 	}
 

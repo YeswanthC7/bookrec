@@ -177,7 +177,33 @@ paths:
           schema:
             additionalProperties: true
             type: object
-      summary: Login and get JWT token
+      summary: Login and get JWT token + refresh token
+      tags:
+      - Auth
+  /logout:
+    post:
+      consumes:
+      - multipart/form-data
+      parameters:
+      - description: Refresh Token
+        in: formData
+        name: refresh_token
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Revoke a refresh token (logout)
       tags:
       - Auth
   /recommendations/{user_id}:
@@ -201,6 +227,32 @@ paths:
       summary: Get recommended books for a user
       tags:
       - Recommendations
+  /refresh:
+    post:
+      consumes:
+      - multipart/form-data
+      parameters:
+      - description: Refresh Token
+        in: formData
+        name: refresh_token
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Rotate refresh token and get new access token
+      tags:
+      - Auth
   /stats:
     get:
       produces:
