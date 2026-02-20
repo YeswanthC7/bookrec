@@ -233,19 +233,25 @@ Ideas for future extensions:
 ## Auth (JWT)
 
 ### Create user
+```bash
 curl -X POST http://localhost:8080/users \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "email=testjwt@example.com&handle=testjwt&password=Passw0rd!"
+```
 
 ### Login
+```bash
 curl -X POST http://localhost:8080/login \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "email=testjwt@example.com&password=Passw0rd!"
+```
 
 # => copy token from response
 
 ### Protected: create interaction
+```bash
 curl -X POST http://localhost:8080/interactions \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "user_id=1&book_id=1&action=like"
+```
