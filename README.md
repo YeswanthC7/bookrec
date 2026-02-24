@@ -1,15 +1,15 @@
-
 # BookRec – Personalized Book Recommendation Backend
 
 BookRec is a small backend service that learns from a user’s likes and browsing history and recommends books using only SQL and open data. It is designed as a portfolio project to demonstrate practical backend skills using Go, MySQL, and public book APIs.
 
 ## Features
 
-- User registration with basic profile (email + handle)
+- User registration with basic profile (email + handle + password)
+- JWT-based authentication (access + refresh tokens)
 - Book catalogue populated from a free public API
-- Tracking of user interactions  
+- Tracking of user interactions
   - views, likes, optional 1–5 rating
-- SQL-only recommendation engine  
+- SQL-only recommendation engine
   - “people who liked the same books as you also liked…”
 - System stats endpoint (users, books, interactions)
 - Search and pagination for books
@@ -22,50 +22,8 @@ BookRec is a small backend service that learns from a user’s likes and browsin
 - **Database:** MySQL 8 (Docker container for local dev)
 - **Migrations:** SQL files under `db/migrations`
 - **Docs:** Swagger / OpenAPI (`swaggo/gin-swagger`)
+- **Auth:** JWT (`github.com/golang-jwt/jwt/v5`) + refresh token rotation
 - **External data:** Open Library public API for seeding books
-
-## High-Level Architecture
-
-- `cmd/server/main.go` – HTTP API entry point (Gin router + handlers)
-- `cmd/jobs/ingest/main.go` – one-off job to pull book data from Open Library and insert into `books`
-- `db/migrations` – schema for `books`, `users`, `interactions`
-- `configs/.env` – database connection configuration
-- `internal/*` – planned packages for a more layered design (`api`, `core`, `store`, `external`, `recommend`)
-
-The server exposes a REST API on port `8080`. MySQL runs locally (typically via Docker) on port `3307`, and the Go app connects using environment variables.
-
-## Data Model
-
-**books**
-
-- `id` – primary key  
-- `title`  
-- `author`  
-- `published_year`
-
-**users**
-
-- `id` – primary key  
-- `email` – unique  
-- `handle`  
-- `created_at`
-
-**interactions**
-
-- `id` – primary key  
-- `user_id` – foreign key → `users.id`  
-- `book_id` – foreign key → `books.id`  
-- `action` – `view`, `like` or `rating`  
-- `rating` – nullable 1–5  
-- `created_at`
-
-Recommendations are computed with a SQL query that looks at:
-
-1. Books the current user liked  
-2. Other users who liked the same books  
-3. Other books those similar users liked that the current user has not interacted with yet
-
-The query aggregates these candidate books and ranks them by a `score` derived from the number of supporting interactions.
 
 ## Prerequisites
 
@@ -79,11 +37,13 @@ Install `swag` once:
 go install github.com/swaggo/swag/cmd/swag@latest
 ```
 
+---
+
 ## Getting Started (Local Development)
 
 From the project root:
 
-### 1. Start MySQL with Docker
+### 1) Start MySQL with Docker
 
 ```bash
 docker run --name bookrec-mysql \
@@ -95,7 +55,7 @@ docker run --name bookrec-mysql \
 
 This gives you a `bookrec` database on `127.0.0.1:3307` with user `root/root`.
 
-### 2. Create environment file
+### 2) Create environment file
 
 Create `configs/.env`:
 
@@ -107,7 +67,7 @@ DB_NAME=bookrec
 DB_TLS=false
 ```
 
-### 3. Apply migrations
+### 3) Apply migrations
 
 If you use the `migrate` CLI:
 
@@ -118,7 +78,7 @@ migrate -path db/migrations \
 
 Alternatively, run the `.up.sql` files under `db/migrations` manually in your MySQL client.
 
-### 4. Ingest sample books
+### 4) Ingest sample books
 
 From the project root:
 
@@ -128,13 +88,15 @@ go run cmd/jobs/ingest/main.go
 
 This job calls the Open Library API, normalises fields, and inserts a small curated catalogue into `books`.
 
-### 5. Run the API server
+### 5) Run the API server
 
 ```bash
 go run cmd/server/main.go
 ```
 
-Server will listen on `http://localhost:8080`.
+Server listens on `http://localhost:8080`.
+
+---
 
 ## API Overview
 
@@ -143,63 +105,131 @@ Server will listen on `http://localhost:8080`.
 - `GET /healthz` – simple health check
 - `GET /stats` – counts of users, books, interactions
 
+### Books
+
+- `GET /books` – paginated list
+  - `page` (query, optional, default `1`)
+  - `limit` (query, optional, default `20`, max `100`)
+- `GET /books/popular` – most liked books globally
+- `GET /books/search` – search + filters + pagination
+  - `q` (query, optional)
+  - `author` (query, optional)
+  - `year_from` (query, optional)
+  - `year_to` (query, optional)
+  - `sort` (query, optional; e.g. `relevance`, `newest`, `popular`)
+  - `page` (query, optional, default `1`)
+  - `limit` (query, optional, default `20`, max `100`)
+
 ### Users
 
-- `POST /users` – create a new user  
-  - `email` (form-data, required)  
-  - `handle` (form-data, required)  
+- `POST /users` – create a new user
+  - `email` (x-www-form-urlencoded, required)
+  - `handle` (x-www-form-urlencoded, required)
+  - `password` (x-www-form-urlencoded, required)
 - `GET /users` – list all users
 - `GET /users/{id}/history` – last 50 interactions for a user
 
-### Books
+### Auth
 
-- `GET /books` – paginated list  
-  - `page` (query, optional, default `1`)  
-  - `limit` (query, optional, default `20`, max `100`)  
-- `GET /books/popular` – most liked books globally
+- `POST /login` – login and receive tokens
+  - `email` (x-www-form-urlencoded, required)
+  - `password` (x-www-form-urlencoded, required)
+  - response includes `access_token`, `refresh_token`, and `user`
+- `POST /refresh` – rotate tokens using a refresh token
+  - `refresh_token` (x-www-form-urlencoded, required)
+- `POST /logout` – revoke the provided refresh token
+  - `refresh_token` (x-www-form-urlencoded, required)
+- `POST /logout-all` – revoke all refresh tokens for the authenticated user
+  - requires `Authorization: Bearer <access_token>`
 
-### Interactions
+### Interactions (Protected)
 
-- `POST /interactions` – record a user action on a book  
-  - `user_id` (form-data, required)  
-  - `book_id` (form-data, required)  
-  - `action` (form-data, required: `view`, `like`, `rating`)  
-  - `rating` (form-data, optional for the `rating` action)
+- `POST /interactions` – record a user action on a book (**requires auth**)
+  - `Authorization: Bearer <access_token>`
+  - `user_id` (x-www-form-urlencoded, required)
+  - `book_id` (x-www-form-urlencoded, required)
+  - `action` (x-www-form-urlencoded, required: `view`, `like`, `rating`)
+  - `rating` (x-www-form-urlencoded, optional for the `rating` action)
 
 ### Recommendations
 
 - `GET /recommendations/{user_id}` – recommended books for that user, sorted by score
 
+---
+
 ## Example Requests
 
-Create a user:
+### Create a user (JWT-enabled)
 
 ```bash
 curl -X POST http://localhost:8080/users \
-  -d "email=user1@example.com" \
-  -d "handle=user1"
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "email=testjwt@example.com&handle=testjwt&password=Passw0rd!"
 ```
 
-List books (first page, 10 per page):
+### Login
+
+```bash
+curl -X POST http://localhost:8080/login \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "email=testjwt@example.com&password=Passw0rd!"
+```
+
+Response example:
+
+```json
+{
+  "access_token": "<jwt>",
+  "refresh_token": "<refresh>",
+  "user": { "id": 1, "email": "testjwt@example.com", "role": "user" }
+}
+```
+
+### List books (page 1, 10 per page)
 
 ```bash
 curl "http://localhost:8080/books?page=1&limit=10"
 ```
 
-Record that a user liked a book:
+### Protected: create interaction (like a book)
 
 ```bash
 curl -X POST http://localhost:8080/interactions \
-  -d "user_id=1" \
-  -d "book_id=5" \
-  -d "action=like"
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "user_id=1&book_id=1&action=like"
 ```
 
-Fetch recommendations for user `1`:
+### Fetch recommendations for user 1
 
 ```bash
 curl http://localhost:8080/recommendations/1
 ```
+
+### Refresh tokens
+
+```bash
+curl -X POST http://localhost:8080/refresh \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "refresh_token=<REFRESH_TOKEN>"
+```
+
+### Logout (revoke refresh token)
+
+```bash
+curl -X POST http://localhost:8080/logout \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "refresh_token=<REFRESH_TOKEN>"
+```
+
+### Logout all sessions (revoke all refresh tokens)
+
+```bash
+curl -X POST http://localhost:8080/logout-all \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+---
 
 ## API Documentation (Swagger)
 
@@ -214,6 +244,8 @@ If you change handlers or add endpoints, regenerate docs from project root:
 swag init -g cmd/server/main.go -o docs
 ```
 
+---
+
 ## Notes and Possible Extensions
 
 This project is intentionally focused on fundamentals:
@@ -224,34 +256,9 @@ This project is intentionally focused on fundamentals:
 
 Ideas for future extensions:
 
-- JWT-based authentication and per-user API keys
-- More advanced ranking (decay by time, weighting likes vs ratings)
-- Search endpoint with full-text support
-- Moving handler logic into `internal/api` and `internal/core` for a stricter layered architecture
-- Docker Compose file to bring up API + MySQL in one command
-
-## Auth (JWT)
-
-### Create user
-```bash
-curl -X POST http://localhost:8080/users \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "email=testjwt@example.com&handle=testjwt&password=Passw0rd!"
-```
-
-### Login
-```bash
-curl -X POST http://localhost:8080/login \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "email=testjwt@example.com&password=Passw0rd!"
-```
-
-# => copy token from response
-
-### Protected: create interaction
-```bash
-curl -X POST http://localhost:8080/interactions \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "user_id=1&book_id=1&action=like"
-```
+- Move auth refresh token to HttpOnly cookies
+- Add more advanced ranking (decay by time, weighting likes vs ratings)
+- Add search full-text support
+- Move handler logic into `internal/api` and `internal/core` for a stricter layered architecture
+- Add Docker Compose to bring up API + MySQL in one command
+- Expand the `web/` frontend into a full demo UI
