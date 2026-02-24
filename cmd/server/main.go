@@ -19,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
+        "github.com/gin-contrib/cors"
 
 	// Swagger
 	_ "github.com/YeswanthC7/bookrec/docs"
@@ -209,6 +210,13 @@ func main() {
 	defer func() { _ = db.Close() }()
 
 	r := gin.Default()
+        r.Use(cors.New(cors.Config{
+ 	  AllowOrigins:     []string{"http://localhost:5173"},
+ 	  AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+	  AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+ 	  ExposeHeaders:    []string{"Content-Length"},
+ 	  AllowCredentials: true,
+	}))
 
 	// Routes
 	r.GET("/healthz", HealthHandler)
